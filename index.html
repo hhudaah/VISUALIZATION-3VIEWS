@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Dubai Traffic Incidents — Interactive Dashboard</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+
+  <style>
+    body {
+      margin: 20px;
+      font-family: system-ui, "Segoe UI", sans-serif;
+      background: #fafafa;
+      color: #222;
+    }
+
+    h1 { font-size: 26px; margin-bottom: 10px; }
+
+    .instructions {
+      margin-bottom: 20px;
+      color: #555;
+      font-size: 15px;
+    }
+
+    #resetBtn {
+      padding: 8px 16px;
+      background: #0072B2;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-bottom: 30px;
+      font-size: 14px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 30px;
+      width: 100%;
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+
+    .panel {
+      background: white;
+      height: 430px;
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.10);
+    }
+
+    .panel.full {
+      grid-column: 1 / 3;
+      height: 460px;
+    }
+
+    h2 {
+      margin-bottom: 10px;
+      font-size: 17px;
+      font-weight: 600;
+    }
+
+    svg { width: 100%; height: calc(100% - 40px); }
+
+    #tooltip {
+      position: absolute;
+      background: white;
+      padding: 6px 10px;
+      font-size: 12px;
+      border-radius: 6px;
+      box-shadow: 0 0 6px rgba(0,0,0,0.15);
+      pointer-events: none;
+      display: none;
+      z-index: 10;
+    }
+  </style>
+</head>
+
+<body>
+
+<h1>Dubai Traffic Incidents — Dashboard</h1>
+
+<p class="instructions">
+  Fully linked interaction between all three views.  
+  All charts smoothly animate when filters change.
+</p>
+
+<button id="resetBtn">Reset Filters</button>
+
+<div id="tooltip"></div>
+
+<div class="layout">
+
+  <div class="panel">
+    <h2>A) Polar Area Chart (Hour)</h2>
+    <svg id="polar"></svg>
+  </div>
+
+  <div class="panel">
+    <h2>B) Force Layout (Type)</h2>
+    <svg id="force"></svg>
+  </div>
+
+  <div class="panel full">
+    <h2>C) Stacked Bar Chart (Type × Hour)</h2>
+    <svg id="stacked"></svg>
+  </div>
+
+</div>
+
+<script>
+/* ======================================
+   GLOBAL FILTER STATE
+====================================== */
+let selectedHour = null;
+let selectedType = null;
+
+const tooltip = d3.select("#tooltip");
+const parseDT = d3.timeParse("%d/%m/%Y %H:%M:%S");
+
+const CSV_URL =
+  "https://raw.githubusercontent.com/sheriefAbdallah/CS318/refs/heads/main/Traffic_Incidents.csv";
+
+const palette = [
+  "#332288","#88CCEE","#44AA99","#117733",
+  "#999933","#DDCC77","#CC6677","#882255",
+  "#AA4499","#661100"
+];
+
+/* ======================================
+   LOAD DATA
+====================================== */
+d3.csv(CSV_URL).then(raw => {
+
+  const data = raw.map(d => {
+    const dt = parseDT(d.acci_time);
+    return {
+      hour: dt ? dt.getHours() : null,
+      type: d.acci_name,
+      lon: +d.acci_x,
+      lat: +d.acci_y
+    };
+  }).filter(d => d.hour !== null);
+
+  const freq = Array.from(
+    d3.rollup(data, v=>v.length, d=>d.type),
+    ([type,count]) => ({type,count})
+  ).sort((a,b)=>b.count-a.count);
+
+  const topTypes = freq.slice(0,8).map(d=>d.type);
+  const other = "Other";
+
+  data.forEach(d => d.typeNorm = topTypes.includes(d.type) ? d.type : other);
+
+  const allTypes = [...new Set(data.map(d => d.typeNorm))];
+  const color = d3.scaleOrdinal().domain(allTypes).range(palette);
+
+  buildPolar(data);
+  buildForce(data, allTypes, color);
+  buildStacked(data, allTypes, color);
+});
+
+/* ======================================
+   A) POLAR AREA CHART
+====================================== */
+let polarSlices;
+
+function buildPolar(data) {
+  const svg = d3.select("#polar");
+  const w = svg.node().getBoundingClientRect().width;
+  const h = svg.node().getBoundingClientRect().height;
+  const R = Math.min(w,h)/2 - 40;
+
+  const g = svg.append("g")
+    .attr("transform",`translate(${w/2},${h/2})`);
+
+  const hours = d3.range(24);
+  const counts = d3.rollup(data,v=>v.length,d=>d.hour);
+  const values = hours.map(h=>({hour:h,value:counts.get(h)||0}));
+
+  const r = d3.scaleLinear()
+      .domain([0,d3.max(values,d=>d.value)])
+      .range([20,R]);
+
+  const a = d3.scaleLinear()
+      .domain([0,24])
+      .range([0, Math.PI*2]);
+
+  const arc = d3.arc()
+      .innerRadius(0)
+      .outerRadius(d=>r(d.value))
+      .startAngle(d=>a(d.hour))
+      .endAngle(d=>a(d.hour+1));
+
+  polarSlices = g.selectAll("path")
+      .data(values)
+      .join("path")
+      .attr("d",arc)
+      .attr("fill",(d,i)=>palette[i%palette.length])
+      .style("cursor","pointer")
+      .on("mousemove",(e,d)=>{
+        tooltip.style("display","block")
+          .style("left",(e.pageX+10)+"px")
+          .style("top",(e.pageY-10)+"px")
+          .html(`Hour: <b>${d.hour}:00</b><br>Count: ${d.value}`);
+      })
+      .on("mouseout",()=>tooltip.style("display","none"))
+      .on("click",(e,d)=>{
+        selectedHour = selectedHour===d.hour ? null : d.hour;
+        updateAll();
+      });
+}
+
+/* ======================================
+   B) FORCE LAYOUT (with animation)
+====================================== */
+let forceCircles, forceNodes, forceSim, forceG;
+
+function buildForce(data, allTypes, color) {
+  const svg = d3.select("#force");
+  const w = svg.node().getBoundingClientRect().width;
+  const h = svg.node().getBoundingClientRect().height;
+
+  forceNodes = allTypes.map(t => ({
+    id: t,
+    count: data.filter(d=>d.typeNorm===t).length
+  }));
+
+  forceSim = d3.forceSimulation(forceNodes)
+      .force("center",d3.forceCenter(w/2,h/2))
+      .force("charge",d3.forceManyBody().strength(12))
+      .force("collide",d3.forceCollide(d=>Math.sqrt(d.count)+4))
+      .alphaDecay(0.05)         // Smoother motion
+      .on("tick", tick);
+
+  forceG = svg.append("g");
+
+  forceCircles = forceG.selectAll("circle")
+      .data(forceNodes)
+      .join("circle")
+      .attr("r",d=>Math.sqrt(d.count))
+      .attr("fill",(d,i)=>palette[i%palette.length])
+      .attr("stroke","white")
+      .attr("stroke-width",1.4)
+      .style("cursor","pointer")
+      .on("mousemove",(e,d)=>{
+        tooltip.style("display","block")
+          .style("left",(e.pageX+10)+"px")
+          .style("top",(e.pageY-10)+"px")
+          .html(`Type: <b>${d.id}</b><br>Count: ${d.count}`);
+      })
+      .on("mouseout",()=>tooltip.style("display","none"))
+      .on("click",(e,d)=>{
+        selectedType = selectedType===d.id ? null : d.id;
+        restartForce();     // <<< SMOOTH ANIMATION
+        updateAll();
+      });
+
+  function tick(){
+    forceCircles
+      .attr("cx",d=>d.x)
+      .attr("cy",d=>d.y);
+  }
+}
+
+/* 🔥 Smooth animated reposition whenever filters change */
+function restartForce(){
+  forceSim.alpha(0.60);   // big kick
+  forceSim.restart();      // smooth physics
+}
+
+/* ======================================
+   C) STACKED BAR CHART
+====================================== */
+let stackedRects;
+
+function buildStacked(data, allTypes, color){
+  const svg = d3.select("#stacked");
+  const w = svg.node().getBoundingClientRect().width;
+  const h = svg.node().getBoundingClientRect().height;
+
+  const margin = {top:20,right:20,bottom:40,left:60};
+  const innerW = w-margin.left-margin.right;
+  const innerH = h-margin.top-margin.bottom;
+
+  const g = svg.append("g")
+    .attr("transform",`translate(${margin.left},${margin.top})`);
+
+  const hours = d3.range(24);
+  const grouped = {};
+  hours.forEach(h=>grouped[h]={hour:h});
+  data.forEach(d=>{
+    grouped[d.hour][d.typeNorm]=(grouped[d.hour][d.typeNorm]||0)+1;
+  });
+
+  const rows = hours.map(h=>grouped[h]);
+  const stack = d3.stack().keys(allTypes);
+  const series = stack(rows);
+
+  const x = d3.scaleBand().domain(hours).range([0,innerW]).padding(0.15);
+  const y = d3.scaleLinear()
+      .domain([0,d3.max(rows,r=>d3.sum(allTypes,t=>r[t]||0))])
+      .range([innerH,0]);
+
+  g.append("g").attr("transform",`translate(0,${innerH})`)
+    .call(d3.axisBottom(x).tickValues([0,4,8,12,16,20]));
+
+  g.append("g").call(d3.axisLeft(y));
+
+  const layer = g.selectAll(".layer")
+      .data(series)
+      .join("g")
+      .attr("class","layer")
+      .attr("fill",d=>color(d.key))
+      .each(function(d){ this.__type = d.key; });
+
+  stackedRects = layer.selectAll("rect")
+      .data(d=>d)
+      .join("rect")
+      .attr("x",(d,i)=>x(hours[i]))
+      .attr("y",d=>y(d[1]))
+      .attr("height",d=>y(d[0]) - y(d[1]))
+      .attr("width",x.bandwidth())
+      .style("cursor","pointer")
+      .on("mousemove",(e,d)=>{
+        const hour = d.data.hour;
+        const count = d[1]-d[0];
+        const type = e.target.parentNode.__type;
+
+        tooltip.style("display","block")
+          .style("left",(e.pageX+10)+"px")
+          .style("top",(e.pageY-10)+"px")
+          .html(`
+            <b>Type:</b> ${type}<br>
+            <b>Hour:</b> ${hour}:00<br>
+            <b>Count:</b> ${count}
+          `);
+      })
+      .on("mouseout",()=>tooltip.style("display","none"))
+      .on("click",(e,d)=>{
+        selectedHour = d.data.hour;
+        restartForce();  // smooth animation
+        updateAll();
+      });
+}
+
+/* ======================================
+   UPDATE EVERYTHING
+====================================== */
+function updateAll(){
+
+  /* POLAR */
+  polarSlices.attr("opacity",d=>{
+    if(selectedType===null && selectedHour===null) return 1;
+    if(selectedHour!==null) return d.hour===selectedHour ? 1 : 0.12;
+    return hourHasType(d.hour, selectedType) ? 1 : 0.12;
+  });
+
+  /* FORCE */
+  forceCircles.attr("opacity",d=>{
+    if(selectedType===null && selectedHour===null) return 1;
+    if(selectedType!==null) return d.id===selectedType ? 1 : 0.12;
+    return typeInHour(d.id, selectedHour) ? 1 : 0.12;
+  });
+
+  /* STACKED */
+  stackedRects.attr("opacity",function(d){
+    const hour = d.data.hour;
+    const type = this.parentNode.__type;
+    if(selectedType===null && selectedHour===null) return 1;
+    if(selectedType!==null) return type===selectedType ? 1 : 0.12;
+    if(selectedHour!==null) return hour===selectedHour ? 1 : 0.12;
+  });
+}
+
+/* Helpers */
+function hourHasType(hour, type){
+  let found = false;
+  stackedRects.each(function(d){
+    if(d.data.hour===hour){
+      if(d.data[type]) found = true;
+    }
+  });
+  return found;
+}
+
+function typeInHour(type, hour){
+  let found = false;
+  stackedRects.each(function(d){
+    if(d.data.hour===hour){
+      if(this.parentNode.__type===type) found = true;
+    }
+  });
+  return found;
+}
+
+/* RESET */
+document.getElementById("resetBtn").addEventListener("click",()=>{
+  selectedHour = null;
+  selectedType = null;
+  restartForce();
+  updateAll();
+});
+</script>
+
+</body>
+</html>
